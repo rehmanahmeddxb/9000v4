@@ -1,0 +1,310 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center mb-4 gap-3">
+    <h2 class="fw-bold text-warning mb-0"><i class="bi bi-cart-check me-2"></i>Direct Sales</h2>
+    <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-warning btn-sm text-dark fw-bold" data-bs-toggle="modal" data-bs-target="#addSaleModal">
+            <i class="bi bi-plus-lg"></i> Add Sale
+        </button>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm" style="background: #1e293b; border: 2px solid #475569 !important; border-radius: 15px; overflow: hidden;">
+    <div class="table-responsive">
+        <table class="table table-dark table-hover align-middle mb-0">
+            <thead style="background: #0f172a;">
+                <tr>
+                    <th class="fw-bold py-3 ps-4 border-bottom border-secondary text-white-50">Auto Bill</th>
+                    <th class="fw-bold py-3 border-bottom border-secondary text-white-50">Manual Bill</th>
+                    <th class="fw-bold py-3 border-bottom border-secondary text-white-50">Client</th>
+                    <th class="fw-bold py-3 border-bottom border-secondary text-white-50">Product</th>
+                    <th class="fw-bold py-3 border-bottom border-secondary text-white-50">Qty</th>
+                    <th class="fw-bold py-3 border-bottom border-secondary text-white-50">Total</th>
+                    <th class="fw-bold py-3 border-bottom border-secondary text-white-50">Paid</th>
+                    <th class="fw-bold py-3 text-end pe-4 border-bottom border-secondary text-white-50">Actions</th>
+                </tr>
+            </thead>
+            <tbody style="background: #1e293b;">
+                {% for sale in sales %}
+                <tr style="border-bottom: 1px solid #334155;">
+                    <td class="ps-4">
+                        <a href="/view_bill/{{ sale.auto_bill_no|replace('#', '%23') }}" class="badge bg-dark border border-secondary text-warning text-decoration-none">{{ sale.auto_bill_no }}</a>
+                    </td>
+                    <td class="text-white">{{ sale.manual_bill_no }}</td>
+                    <td class="text-white">{{ sale.client_name }}</td>
+                    <td class="text-white">
+                        {% if sale.items %}
+                            {{ sale.items[0].product_name }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td class="text-info fw-bold">
+                        {% if sale.items %}
+                            {{ sale.items[0].qty }}
+                        {% else %}
+                            0
+                        {% endif %}
+                    </td>
+                    <td class="text-danger fw-bold">{{ currency_symbol }}{{ "%.2f"|format(sale.amount) }}</td>
+                    <td class="text-success fw-bold">{{ currency_symbol }}{{ "%.2f"|format(sale.paid_amount) }}</td>
+                    <td class="text-end pe-4">
+                        <a href="/view_bill/{{ sale.auto_bill_no|replace('#', '%23') }}" class="btn btn-outline-info btn-sm border-2 rounded-pill shadow-sm me-1" title="View"><i class="bi bi-eye"></i></a>
+                        <button type="button" class="btn btn-outline-warning btn-sm border-2 rounded-pill shadow-sm me-1" data-bs-toggle="modal" data-bs-target="#editSaleModal{{ sale.id }}" title="Edit">
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        <a href="/delete_bill/Sale/{{ sale.id }}" class="btn btn-outline-danger btn-sm border-2 rounded-pill shadow-sm" onclick="return confirm('Delete sale?')"><i class="bi bi-trash"></i></a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="modal fade" id="addSaleModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <form class="modal-content border-secondary" style="background: #1e293b;" action="/add_sale" method="POST" enctype="multipart/form-data">
+            <div class="modal-header border-0">
+                <h5 class="text-warning fw-bold">New Direct Sale (Auto No: {{ next_auto }})</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row">
+                    <div class="col-md-6 border-end border-secondary">
+                        <div class="mb-3 position-relative">
+                            <label class="text-white-50 small fw-bold mb-1">1. SELECT CLIENT</label>
+                            <div class="input-group">
+                                <input type="text" name="client_code" id="addSaleClientCode" class="form-control bg-dark text-white border-secondary" placeholder="Search by name or code..." autocomplete="off" required onfocus="showCombobox('addSaleClientCode', 'addSaleCombobox')" oninput="filterCombobox('addSaleClientCode', 'addSaleCombobox', 'addSaleClientNameDisplay'); updateBookingStatus(this.value)">
+                                <button class="btn btn-outline-secondary" type="button" onclick="toggleCombobox('addSaleClientCode', 'addSaleCombobox')">
+                                    <i class="bi bi-chevron-down text-warning"></i>
+                                </button>
+                            </div>
+                            <div id="addSaleCombobox" class="combobox-list shadow-lg" style="display: none;">
+                                {% for client in clients %}
+                                <div class="combobox-item" onclick="selectComboboxItem('addSaleClientCode', 'addSaleCombobox', '{{ client.code }}', '{{ client.name }}', 'addSaleClientNameDisplay'); updateBookingStatus('{{ client.code }}')">
+                                    <span class="fw-bold text-warning code-span">{{ client.code }}</span>
+                                    <span class="ms-2 text-white-50 small name-span">{{ client.name }}</span>
+                                </div>
+                                {% endfor %}
+                            </div>
+                            <div id="addSaleClientNameDisplay" class="text-info small mt-1 fw-bold"></div>
+                        </div>
+                        <div id="bookingStatusContainer" class="p-3 bg-dark rounded border border-secondary" style="min-height: 200px;">
+                            <p class="text-white-50 text-center mt-5">Select a client to see booked items</p>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <label class="text-white-50 small fw-bold mb-1 d-block">2. SALE DETAILS</label>
+                        <div id="sale-items-container">
+                            <div class="compact-item-row mb-3 p-2 rounded border border-secondary bg-dark">
+                                <div class="row g-2 align-items-center">
+                                    <div class="col-12 mb-2">
+                                        <select name="product_name[]" class="form-select form-select-sm bg-dark text-white border-secondary price-trigger" required>
+                                            <option value="">Material</option>
+                                            {% for mat in materials %}
+                                            <option value="{{ mat.name }}" data-price="{{ mat.unit_price }}">{{ mat.name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="input-group input-group-sm">
+                                            <button class="btn btn-outline-secondary btn-sm" type="button" onclick="changeSaleQty(this, -1)">-</button>
+                                            <input type="number" step="0.01" name="qty[]" value="1.00" class="form-control bg-dark text-white border-secondary text-center qty-input" required>
+                                            <button class="btn btn-outline-secondary btn-sm" type="button" onclick="changeSaleQty(this, 1)">+</button>
+                                        </div>
+                                    </div>
+                                    <div class="col-6 position-relative">
+                                        <input type="number" step="0.01" name="unit_rate[]" class="form-control form-control-sm bg-dark text-white border-secondary rate-input" placeholder="Rate" required>
+                                        <div class="remove-btn position-absolute top-0 end-0 translate-middle-y mt-2" onclick="this.closest('.compact-item-row').remove(); updateSalePrice(this.closest('form'));" style="cursor:pointer; z-index: 5;">
+                                            <i class="bi bi-x-circle-fill text-danger"></i>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-warning mb-3 w-100" onclick="addSaleItemRow()">+ Add More Items</button>
+                        
+                        <div class="mb-3">
+                            <label class="text-white-50 small fw-bold mb-1">TOTAL AMOUNT</label>
+                            <input type="number" step="0.01" name="amount" id="saleTotal" class="form-control bg-dark text-white border-secondary total-amount" required readonly>
+                        </div>
+                        <div class="mb-3">
+                            <label class="text-white-50 small fw-bold mb-1">PAID NOW</label>
+                            <input type="number" step="0.01" name="paid_amount" class="form-control bg-dark text-white border-secondary" value="0">
+                        </div>
+                        <div class="mb-3">
+                            <label class="text-white-50 small fw-bold mb-1">MANUAL BILL NO</label>
+                            <input type="text" name="manual_bill_no" class="form-control bg-dark text-white border-secondary">
+                        </div>
+                        <div class="mb-3">
+                            <label class="text-white-50 small fw-bold mb-1">BILL PHOTO</label>
+                            <input type="file" name="photo" class="form-control bg-dark text-white border-secondary" accept="image/*">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer border-0">
+                <button type="submit" class="btn btn-warning text-dark fw-bold w-100 py-2 rounded-pill">Save Sale</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% for sale in sales %}
+<div class="modal fade" id="editSaleModal{{ sale.id }}" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <form class="modal-content border-secondary" style="background: #1e293b;" action="/edit_bill/Sale/{{ sale.id }}" method="POST" enctype="multipart/form-data">
+            <div class="modal-header border-0">
+                <h5 class="text-warning fw-bold">Edit Sale: {{ sale.auto_bill_no }}</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body text-start">
+                <div class="mb-3 position-relative">
+                    <label class="text-white-50 small fw-bold mb-1">CLIENT (NAME OR CODE)</label>
+                    <div class="input-group">
+                        <input type="text" name="client_code" id="editSaleClientCode{{ sale.id }}" value="{{ sale.client_code or '' }}" class="form-control bg-dark text-white border-secondary" placeholder="Search by name or code..." autocomplete="off" required onfocus="showCombobox('editSaleClientCode{{ sale.id }}', 'editSaleCombobox{{ sale.id }}')" oninput="filterCombobox('editSaleClientCode{{ sale.id }}', 'editSaleCombobox{{ sale.id }}', 'editSaleClientNameDisplay{{ sale.id }}')">
+                        <button class="btn btn-outline-secondary" type="button" onclick="toggleCombobox('editSaleClientCode{{ sale.id }}', 'editSaleCombobox{{ sale.id }}')">
+                            <i class="bi bi-chevron-down text-warning"></i>
+                        </button>
+                    </div>
+                    <div id="editSaleCombobox{{ sale.id }}" class="combobox-list shadow-lg" style="display: none;">
+                        {% for client in clients %}
+                        <div class="combobox-item" onclick="selectComboboxItem('editSaleClientCode{{ sale.id }}', 'editSaleCombobox{{ sale.id }}', '{{ client.code }}', '{{ client.name }}', 'editSaleClientNameDisplay{{ sale.id }}')">
+                            <span class="fw-bold text-warning code-span">{{ client.code }}</span>
+                            <span class="ms-2 text-white-50 small name-span">{{ client.name }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <div id="editSaleClientNameDisplay{{ sale.id }}" class="text-info small mt-1 fw-bold">Name: {{ sale.client_name }}</div>
+                </div>
+
+                <div class="items-container-edit">
+                    {% for item in sale.items %}
+                    <div class="compact-item-row mb-3 p-2 rounded border border-secondary bg-dark">
+                        <div class="row g-2 align-items-center">
+                            <div class="col-12 mb-2">
+                                <select name="product_name[]" class="form-select form-select-sm bg-dark text-white border-secondary price-trigger" required>
+                                    {% for mat in materials %}
+                                    <option value="{{ mat.name }}" data-price="{{ mat.unit_price }}" {% if mat.name == item.product_name %}selected{% endif %}>{{ mat.name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-6">
+                                <div class="input-group input-group-sm">
+                                    <button class="btn btn-outline-secondary btn-sm" type="button" onclick="changeSaleQty(this, -1)">-</button>
+                                    <input type="number" step="0.01" name="qty[]" value="{{ "%.2f"|format(item.qty) }}" class="form-control bg-dark text-white border-secondary text-center qty-input" required>
+                                    <button class="btn btn-outline-secondary btn-sm" type="button" onclick="changeSaleQty(this, 1)">+</button>
+                                </div>
+                            </div>
+                            <div class="col-6 position-relative">
+                                <input type="number" step="0.01" name="unit_rate[]" class="form-control form-control-sm bg-dark text-white border-secondary rate-input" value="{{ item.price_at_time }}" required>
+                                <div class="remove-btn position-absolute top-0 end-0 translate-middle-y mt-2" onclick="this.closest('.compact-item-row').remove(); updateSalePrice(this.closest('form'));" style="cursor:pointer; z-index: 5;">
+                                    <i class="bi bi-x-circle-fill text-danger"></i>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-warning mb-3 w-100" onclick="addSaleItemRowEdit(this)">+ Add More Items</button>
+
+                <div class="row">
+                    <div class="col-6 mb-3">
+                        <label class="text-white-50 small fw-bold mb-1">TOTAL AMOUNT</label>
+                        <input type="number" step="0.01" name="amount" class="form-control bg-dark text-white border-secondary total-amount" value="{{ sale.amount }}" required readonly>
+                    </div>
+                    <div class="col-6 mb-3">
+                        <label class="text-white-50 small fw-bold mb-1">PAID AMOUNT</label>
+                        <input type="number" step="0.01" name="paid_amount" class="form-control bg-dark text-white border-secondary" value="{{ sale.paid_amount }}">
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="text-white-50 small fw-bold mb-1">MANUAL BILL NO</label>
+                    <input type="text" name="manual_bill_no" class="form-control bg-dark text-white border-secondary" value="{{ sale.manual_bill_no }}">
+                </div>
+                <div class="mb-3">
+                    <label class="text-white-50 small fw-bold mb-1">UPDATE PHOTO</label>
+                    <input type="file" name="photo" class="form-control bg-dark text-white border-secondary" accept="image/*">
+                </div>
+            </div>
+            <div class="modal-footer border-0">
+                <button type="submit" class="btn btn-warning text-dark fw-bold w-100 py-2 rounded-pill">Save Changes</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endfor %}
+
+<script>
+function changeSaleQty(btn, delta) {
+    const input = btn.parentElement.querySelector('input');
+    let val = parseFloat(input.value) || 0;
+    val = Math.max(0, val + delta);
+    input.value = val.toFixed(2);
+    updateSalePrice(btn.closest('form'));
+}
+
+function addSaleItemRow() {
+    const container = document.getElementById('sale-items-container');
+    const firstRow = container.querySelector('.compact-item-row');
+    const newRow = firstRow.cloneNode(true);
+    newRow.querySelectorAll('input').forEach(i => {
+        if(i.classList.contains('qty-input')) { i.value = '1.00'; }
+        else { i.value = ''; }
+    });
+    newRow.querySelectorAll('select').forEach(s => s.selectedIndex = 0);
+    container.appendChild(newRow);
+    attachSaleListeners(newRow);
+}
+
+function addSaleItemRowEdit(btn) {
+    const container = btn.previousElementSibling;
+    const firstRow = document.querySelector('.compact-item-row');
+    const newRow = firstRow.cloneNode(true);
+    
+    newRow.querySelectorAll('input').forEach(i => {
+        if(i.classList.contains('qty-input')) { i.value = '1.00'; }
+        else { i.value = ''; }
+    });
+    newRow.querySelectorAll('select').forEach(s => s.selectedIndex = 0);
+    container.appendChild(newRow);
+    attachSaleListeners(newRow);
+}
+
+function attachSaleListeners(row) {
+    const select = row.querySelector('.price-trigger');
+    const rateInput = row.querySelector('.rate-input');
+    const qtyInput = row.querySelector('.qty-input');
+    
+    select.addEventListener('change', () => {
+        const option = select.options[select.selectedIndex];
+        const price = option.getAttribute('data-price') || 0;
+        rateInput.value = price;
+        updateSalePrice(row.closest('form'));
+    });
+
+    [rateInput, qtyInput].forEach(el => {
+        el.addEventListener('input', () => updateSalePrice(row.closest('form')));
+    });
+}
+
+function updateSalePrice(form) {
+    let total = 0;
+    form.querySelectorAll('.compact-item-row').forEach(row => {
+        const rateInput = row.querySelector('.rate-input');
+        const qtyInput = row.querySelector('.qty-input');
+        const price = parseFloat(rateInput.value) || 0;
+        const qty = parseFloat(qtyInput.value) || 0;
+        total += price * qty;
+    });
+    form.querySelector('.total-amount').value = total.toFixed(2);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Other client logic...
+    document.querySelectorAll('.compact-item-row').forEach(row => attachSaleListeners(row));
+});
+</script>
+{% endblock %}
