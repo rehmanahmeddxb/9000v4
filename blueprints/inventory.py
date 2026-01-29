@@ -4,6 +4,14 @@ from datetime import date
 from sqlalchemy import func, case
 from models import db, Material, Entry
 
+# Module configuration
+MODULE_CONFIG = {
+    'name': 'Inventory Module',
+    'description': 'Stock and inventory management',
+    'url_prefix': '/inventory',
+    'enabled': True
+}
+
 inventory_bp = Blueprint('inventory', __name__)
 
 @inventory_bp.route('/stock_summary')
