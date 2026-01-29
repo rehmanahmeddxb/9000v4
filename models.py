@@ -7,7 +7,7 @@ db = SQLAlchemy()
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(100), unique=True, nullable=False)
-    password = db.Column(db.String(200), nullable=False)
+    password_hash = db.Column(db.String(200), nullable=False)
     role = db.Column(db.String(20), default='user')
     can_view_stock = db.Column(db.Boolean, default=True)
     can_view_daily = db.Column(db.Boolean, default=True)
@@ -105,6 +105,7 @@ class PendingBill(db.Model):
     bill_no = db.Column(db.String(100), index=True)
     nimbus_no = db.Column(db.String(100), index=True)
     amount = db.Column(db.Float, default=0)
+    date = db.Column(db.Date)
     reason = db.Column(db.String(500))
     photo_url = db.Column(db.String(500))
     is_paid = db.Column(db.Boolean, default=False)
@@ -124,8 +125,29 @@ class Entry(db.Model):
     type = db.Column(db.String(10), nullable=False, index=True)
     material = db.Column(db.String(100), nullable=False, index=True)
     client = db.Column(db.String(100), index=True)
+    client_name = db.Column(db.String(100), index=True)
     client_code = db.Column(db.String(50), index=True)
     qty = db.Column(db.Float, nullable=False)
     bill_no = db.Column(db.String(100), index=True)
     nimbus_no = db.Column(db.String(100), index=True)
     created_by = db.Column(db.String(100))
+
+
+class ReconBasket(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    bill_no = db.Column(db.String(100), index=True)
+    # Side A - Finance
+    fin_date = db.Column(db.Date)
+    fin_client = db.Column(db.String(200))
+    fin_code = db.Column(db.String(100))
+    fin_amount = db.Column(db.Float, default=0.0)
+    # Side B - Inventory
+    inv_date = db.Column(db.Date)
+    inv_client = db.Column(db.String(200))
+    inv_code = db.Column(db.String(100))
+    inv_material = db.Column(db.String(200))
+    inv_qty = db.Column(db.Float, default=0.0)
+    # Status and meta
+    status = db.Column(db.String(20), default='RED', index=True)  # GREEN/YELLOW/RED/BLUE
+    match_score = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

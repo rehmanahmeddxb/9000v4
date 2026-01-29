@@ -6,6 +6,14 @@ from datetime import datetime, date
 from sqlalchemy import func
 from models import db, Material, Entry, Client, PendingBill
 
+# Module configuration
+MODULE_CONFIG = {
+    'name': 'Import/Export Module',
+    'description': 'Data import and export functionality',
+    'url_prefix': '/import_export',
+    'enabled': True
+}
+
 import_export_bp = Blueprint('import_export', __name__)
 
 def generate_client_code():
