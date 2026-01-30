@@ -62,6 +62,23 @@
                 <label class="small fw-bold text-white-50">To</label>
                 <input type="date" name="end_date" value="{{ end_date }}" class="form-control bg-dark text-white border-secondary">
             </div>
+            <div class="col-6 col-md-2">
+                <label class="small fw-bold text-white-50">Type</label>
+                <select name="type" class="form-select bg-dark text-white border-secondary">
+                    <option value="">All</option>
+                    <option value="IN" {% if type_filter == 'IN' %}selected{% endif %}>IN (Receiving)</option>
+                    <option value="OUT" {% if type_filter == 'OUT' %}selected{% endif %}>OUT (Dispatch)</option>
+                    <option value="BOOKING" {% if type_filter == 'BOOKING' %}selected{% endif %}>BOOKING (Reserved)</option>
+                </select>
+            </div>
+            <div class="col-6 col-md-2">
+                <label class="small fw-bold text-white-50">Has Bill</label>
+                <select name="has_bill" class="form-select bg-dark text-white border-secondary">
+                    <option value="">Any</option>
+                    <option value="1" {% if has_bill_filter == '1' %}selected{% endif %}>With Bill</option>
+                    <option value="0" {% if has_bill_filter == '0' %}selected{% endif %}>Without Bill</option>
+                </select>
+            </div>
             <div class="col-6 col-md-3">
                 <label class="small fw-bold text-white-50 text-uppercase mb-1">Client</label>
                 <div class="position-relative">
@@ -135,7 +152,8 @@
                     <th class="text-white-50">Code</th>
                     <th class="text-white-50">Material</th>
                     <th class="text-white-50">Qty</th>
-                    <th class="text-white-50">Bill No</th>
+                    <th class="text-white-50">Auto Bill</th>
+                    <th class="text-white-50">Manual Bill</th>
                     <th class="text-white-50">Nimbus No</th>
                     <th class="text-white-50">By</th>
                     <th class="text-end pe-3 text-white-50 action-cell">Action</th>
@@ -147,37 +165,57 @@
                     <td class="ps-3 fw-bold text-warning">{{ e.date }}</td>
                     <td class="text-white-50">{{ e.time }}</td>
                     <td>
-                        <span class="badge {{ 'bg-success' if e.type == 'IN' else 'bg-info text-dark' }} px-3 py-2 rounded-pill fw-bold">
-                            {{ e.type }}
-                        </span>
+                        {% if e.type == 'IN' %}
+                        <span class="badge bg-success px-3 py-2 rounded-pill fw-bold">IN</span>
+                        {% elif e.type == 'OUT' %}
+                        <span class="badge bg-info text-dark px-3 py-2 rounded-pill fw-bold">OUT</span>
+                        {% elif e.type == 'BOOKING' %}
+                        <span class="badge bg-warning text-dark px-3 py-2 rounded-pill fw-bold">BOOKING</span>
+                        {% else %}
+                        <span class="badge bg-secondary px-3 py-2 rounded-pill fw-bold">{{ e.type }}</span>
+                        {% endif %}
                     </td>
                     <td class="fw-bold text-white">{{ e.client or '---' }}</td>
                     <td class="text-white-50 small">{{ e.client_code or '---' }}</td>
                     <td class="material-name text-warning fw-bold">{{ e.material }}</td>
-                    <td class="qty-val fw-bold {{ 'text-success' if e.type == 'IN' else 'text-info' }} fs-5">
+                    <td class="qty-val fw-bold {{ 'text-success' if e.type == 'IN' else ( 'text-info' if e.type == 'OUT' else 'text-warning') }} fs-5">
                         {{ '+' if e.type == 'IN' else '-' }}{{ e.qty|int }}
+                    </td>
+                    <td>
+                        {% if e.auto_bill_no and e.auto_bill_no != '---' %}
+                        <a href="/pending_bills?bill_no={{ e.auto_bill_no }}" class="badge bg-dark border border-secondary text-warning text-decoration-none">{{ e.auto_bill_no }}</a>
+                        {% else %}
+                        <span class="text-white-50 small">---</span>
+                        {% endif %}
                     </td>
                     <td>
                         {% if e.bill_no and e.bill_no != '---' %}
                         <a href="/pending_bills?bill_no={{ e.bill_no }}" class="badge bg-dark border border-secondary text-warning text-decoration-none">{{ e.bill_no }}</a>
                         {% else %}
-                        <span class="text-white-50 small">---</span>
+                        <span class="text-white-50 small text-muted">(empty)</span>
                         {% endif %}
                     </td>
                     <td class="text-white-50">{{ e.nimbus_no or '---' }}</td>
                     <td class="text-info small fw-bold">{{ e.created_by or 'System' }}</td>
                     <td class="text-end pe-3 action-cell">
                         {% set today_str = now_date %}
-                        {% if current_user.role == 'admin' or e.date == today_str %}
-                        <button class="btn btn-warning action-btn text-dark me-1" data-bs-toggle="modal" data-bs-target="#editTrack{{ e.id }}">
-                            <i class="bi bi-pencil-fill"></i> Edit
-                        </button>
+                        {% if e.type == 'BOOKING' %}
+                        <a href="/bookings?search={{ e.bill_no or '' }}" class="btn btn-outline-info action-btn me-1">
+                            <i class="bi bi-journal-bookmark me-1"></i> View Booking
+                        </a>
                         {% else %}
-                        <span class="badge bg-secondary opacity-50"><i class="bi bi-lock"></i> Locked</span>
+                            {% if current_user.role == 'admin' or e.date == today_str %}
+                            <button class="btn btn-warning action-btn text-dark me-1" data-bs-toggle="modal" data-bs-target="#editTrack{{ e.id }}">
+                                <i class="bi bi-pencil-fill"></i> Edit
+                            </button>
+                            {% else %}
+                            <span class="badge bg-secondary opacity-50"><i class="bi bi-lock"></i> Locked</span>
+                            {% endif %}
                         {% endif %}
                     </td>
                 </tr>
                 
+                {% if e.type != 'BOOKING' %}
                 <div class="modal fade" id="editTrack{{ e.id }}" tabindex="-1">
                     <div class="modal-dialog modal-lg modal-dialog-centered">
                         <div class="modal-content border-secondary shadow-lg" style="background: #1e293b; border-radius: 15px;">
@@ -256,6 +294,7 @@
                         </div>
                     </div>
                 </div>
+                {% endif %}
                 {% endfor %}
             </tbody>
         </table>

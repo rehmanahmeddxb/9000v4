@@ -23,6 +23,8 @@ class Client(db.Model):
     address = db.Column(db.String(200))
     category = db.Column(db.String(50), default='General') # Categories: General, Walking-Customer, Misc
     is_active = db.Column(db.Boolean, default=True)
+    # If True, this client must always be given a manual invoice/bill number when dispatching
+    require_manual_invoice = db.Column(db.Boolean, default=False)
     transferred_to_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=True)
 
 class Material(db.Model):
@@ -76,6 +78,22 @@ class Payment(db.Model):
     auto_bill_no = db.Column(db.String(50))
     photo_path = db.Column(db.String(200))
 
+
+class Invoice(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    client_code = db.Column(db.String(50), index=True)
+    client_name = db.Column(db.String(100), index=True)
+    invoice_no = db.Column(db.String(100), unique=True, index=True)
+    is_manual = db.Column(db.Boolean, default=False)
+    date = db.Column(db.Date)
+    due_date = db.Column(db.Date, nullable=True)
+    total_amount = db.Column(db.Float, default=0.0)
+    balance = db.Column(db.Float, default=0.0)
+    status = db.Column(db.String(20), default='OPEN')  # OPEN/PAID/PARTIAL/CANCELLED
+    is_cash = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.String(20))
+    created_by = db.Column(db.String(100))
+
 class BillCounter(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     count = db.Column(db.Integer, default=1000)
@@ -89,6 +107,11 @@ class DirectSale(db.Model):
     manual_bill_no = db.Column(db.String(50))
     auto_bill_no = db.Column(db.String(50))
     photo_path = db.Column(db.String(200))
+    # Category for this sale (e.g., General, Walking-Customer, Cash)
+    category = db.Column(db.String(50), index=True, nullable=True)
+    # Optional link to Invoice when a Direct Sale is billed
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoice.id'), nullable=True)
+    invoice = db.relationship('Invoice', backref='direct_sales')
     items = db.relationship('DirectSaleItem', backref='direct_sale', cascade="all, delete-orphan")
 
 class DirectSaleItem(db.Model):
@@ -109,6 +132,8 @@ class PendingBill(db.Model):
     reason = db.Column(db.String(500))
     photo_url = db.Column(db.String(500))
     is_paid = db.Column(db.Boolean, default=False)
+    # Indicates this pending bill was recorded for a cash delivery (no invoice)
+    is_cash = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.String(20))
     created_by = db.Column(db.String(100))
 
@@ -129,8 +154,13 @@ class Entry(db.Model):
     client_code = db.Column(db.String(50), index=True)
     qty = db.Column(db.Float, nullable=False)
     bill_no = db.Column(db.String(100), index=True)
+    auto_bill_no = db.Column(db.String(100), index=True)
     nimbus_no = db.Column(db.String(100), index=True)
+    # Optional link to an Invoice when this entry is billed
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoice.id'), nullable=True)
+    invoice = db.relationship('Invoice', backref='entries')
     created_by = db.Column(db.String(100))
+    client_category = db.Column(db.String(50), index=True, nullable=True)
 
 
 class ReconBasket(db.Model):
