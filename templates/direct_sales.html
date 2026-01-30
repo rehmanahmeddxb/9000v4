@@ -30,6 +30,7 @@
                     <td class="ps-4">
                         <a href="/view_bill/{{ sale.auto_bill_no|replace('#', '%23') }}" class="badge bg-dark border border-secondary text-warning text-decoration-none">{{ sale.auto_bill_no }}</a>
                     </td>
+                    <td class="text-white">{{ sale.manual_bill_no or '—' }}</td>
                     <td class="text-white">{{ sale.manual_bill_no }}</td>
                     <td class="text-white">{{ sale.client_name }}</td>
                     <td class="text-white">
@@ -49,7 +50,11 @@
                     <td class="text-danger fw-bold">{{ currency_symbol }}{{ "%.2f"|format(sale.amount) }}</td>
                     <td class="text-success fw-bold">{{ currency_symbol }}{{ "%.2f"|format(sale.paid_amount) }}</td>
                     <td class="text-end pe-4">
+                        {% if sale.invoice %}
+                        <a href="/view_bill/{{ sale.invoice.invoice_no|replace('#', '%23') }}" class="btn btn-outline-info btn-sm border-2 rounded-pill shadow-sm me-1" title="View Invoice"><i class="bi bi-receipt"></i></a>
+                        {% else %}
                         <a href="/view_bill/{{ sale.auto_bill_no|replace('#', '%23') }}" class="btn btn-outline-info btn-sm border-2 rounded-pill shadow-sm me-1" title="View"><i class="bi bi-eye"></i></a>
+                        {% endif %}
                         <button type="button" class="btn btn-outline-warning btn-sm border-2 rounded-pill shadow-sm me-1" data-bs-toggle="modal" data-bs-target="#editSaleModal{{ sale.id }}" title="Edit">
                             <i class="bi bi-pencil"></i>
                         </button>
@@ -64,7 +69,7 @@
 
 <div class="modal fade" id="addSaleModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-centered">
-        <form class="modal-content border-secondary" style="background: #1e293b;" action="/add_sale" method="POST" enctype="multipart/form-data">
+        <form class="modal-content border-secondary" style="background: #1e293b;" action="/add_direct_sale" method="POST" enctype="multipart/form-data">
             <div class="modal-header border-0">
                 <h5 class="text-warning fw-bold">New Direct Sale (Auto No: {{ next_auto }})</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
@@ -75,11 +80,12 @@
                         <div class="mb-3 position-relative">
                             <label class="text-white-50 small fw-bold mb-1">1. SELECT CLIENT</label>
                             <div class="input-group">
-                                <input type="text" name="client_code" id="addSaleClientCode" class="form-control bg-dark text-white border-secondary" placeholder="Search by name or code..." autocomplete="off" required onfocus="showCombobox('addSaleClientCode', 'addSaleCombobox')" oninput="filterCombobox('addSaleClientCode', 'addSaleCombobox', 'addSaleClientNameDisplay'); updateBookingStatus(this.value)">
+                                <input type="text" name="client_code" id="addSaleClientCode" class="form-control bg-dark text-white border-secondary" placeholder="Search by name or code..." autocomplete="off" required onfocus="showCombobox('addSaleClientCode', 'addSaleCombobox')" oninput="filterCombobox('addSaleClientCode', 'addSaleCombobox', 'addSaleClientNameDisplay'); updateBookingStatus(this.value)" value="{{ client_name_prefill or '' }}">
                                 <button class="btn btn-outline-secondary" type="button" onclick="toggleCombobox('addSaleClientCode', 'addSaleCombobox')">
                                     <i class="bi bi-chevron-down text-warning"></i>
                                 </button>
                             </div>
+                            <input type="hidden" name="client_name" id="addSaleClientNameHidden" value="{{ client_name_prefill or '' }}">
                             <div id="addSaleCombobox" class="combobox-list shadow-lg" style="display: none;">
                                 {% for client in clients %}
                                 <div class="combobox-item" onclick="selectComboboxItem('addSaleClientCode', 'addSaleCombobox', '{{ client.code }}', '{{ client.name }}', 'addSaleClientNameDisplay'); updateBookingStatus('{{ client.code }}')">
@@ -97,6 +103,18 @@
                     
                     <div class="col-md-6">
                         <label class="text-white-50 small fw-bold mb-1 d-block">2. SALE DETAILS</label>
+                        <div class="mb-3">
+                            <label class="text-white-50 small fw-bold mb-1">Category</label>
+                            <select name="category" id="saleCategory" class="form-select form-select-sm bg-dark text-white border-secondary">
+                                {% for cat in categories %}
+                                <option value="{{ cat }}">{{ cat }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="mb-3" id="manualClientNameGroup" style="display:none;">
+                            <label class="text-white-50 small fw-bold mb-1">Customer Name (Cash)</label>
+                            <input type="text" name="manual_client_name" id="manualClientName" class="form-control bg-dark text-white border-secondary">
+                        </div>
                         <div id="sale-items-container">
                             <div class="compact-item-row mb-3 p-2 rounded border border-secondary bg-dark">
                                 <div class="row g-2 align-items-center">
@@ -136,11 +154,23 @@
                         </div>
                         <div class="mb-3">
                             <label class="text-white-50 small fw-bold mb-1">MANUAL BILL NO</label>
-                            <input type="text" name="manual_bill_no" class="form-control bg-dark text-white border-secondary">
+                            <input type="text" id="addSaleManualBill" name="manual_bill_no" class="form-control bg-dark text-white border-secondary">
+                        </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" name="has_bill" id="hasBillCheck" checked>
+                            <label class="form-check-label text-white-50" for="hasBillCheck">This transaction has a Bill No</label>
                         </div>
                         <div class="mb-3">
                             <label class="text-white-50 small fw-bold mb-1">BILL PHOTO</label>
                             <input type="file" name="photo" class="form-control bg-dark text-white border-secondary" accept="image/*">
+                        </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" name="create_invoice" id="createInvoiceCheck">
+                            <label class="form-check-label text-white-50" for="createInvoiceCheck">Create Invoice for this sale</label>
+                        </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" name="track_as_cash" id="trackAsCashCheck">
+                            <label class="form-check-label text-white-50" for="trackAsCashCheck">Record as Cash Delivery (Track in Pending Bills)</label>
                         </div>
                     </div>
                 </div>
@@ -222,7 +252,11 @@
                 </div>
                 <div class="mb-3">
                     <label class="text-white-50 small fw-bold mb-1">MANUAL BILL NO</label>
-                    <input type="text" name="manual_bill_no" class="form-control bg-dark text-white border-secondary" value="{{ sale.manual_bill_no }}">
+                    <input type="text" id="editSaleManualBill{{ sale.id }}" name="manual_bill_no" class="form-control bg-dark text-white border-secondary" value="{{ sale.manual_bill_no }}">
+                </div>
+                <div class="form-check mb-3">
+                    <input class="form-check-input edit-has-bill-checkbox" type="checkbox" name="has_bill" id="editHasBillCheck{{ sale.id }}" data-target="editSaleManualBill{{ sale.id }}" {% if sale.manual_bill_no %}checked{% endif %}>
+                    <label class="form-check-label text-white-50" for="editHasBillCheck{{ sale.id }}">This transaction has a Bill No</label>
                 </div>
                 <div class="mb-3">
                     <label class="text-white-50 small fw-bold mb-1">UPDATE PHOTO</label>
@@ -305,6 +339,60 @@ function updateSalePrice(form) {
 document.addEventListener('DOMContentLoaded', function() {
     // Other client logic...
     document.querySelectorAll('.compact-item-row').forEach(row => attachSaleListeners(row));
+
+    // Toggle manual bill field in Add Sale modal
+    const addHasBill = document.getElementById('hasBillCheck');
+    const addManual = document.getElementById('addSaleManualBill');
+    if (addHasBill && addManual) {
+        const setAddState = () => {
+            if (addHasBill.checked) {
+                addManual.readOnly = false;
+                addManual.classList.remove('text-muted');
+            } else {
+                addManual.value = '';
+                addManual.readOnly = true;
+                addManual.classList.add('text-muted');
+            }
+        }
+        setAddState();
+        addHasBill.addEventListener('change', setAddState);
+    }
+
+    // Toggle manual client name when category == Cash
+    const saleCategory = document.getElementById('saleCategory');
+    const manualClientGroup = document.getElementById('manualClientNameGroup');
+    const clientCodeInput = document.getElementById('addSaleClientCode');
+    if (saleCategory) {
+        const setCatState = () => {
+            if (saleCategory.value.toLowerCase() === 'cash') {
+                manualClientGroup.style.display = '';
+                if (clientCodeInput) clientCodeInput.removeAttribute('required');
+            } else {
+                manualClientGroup.style.display = 'none';
+                if (clientCodeInput) clientCodeInput.setAttribute('required', 'required');
+            }
+        }
+        setCatState();
+        saleCategory.addEventListener('change', setCatState);
+    }
+    // Toggle manual bill for each Edit modal
+    document.querySelectorAll('.edit-has-bill-checkbox').forEach(cb => {
+        const targetId = cb.dataset.target;
+        const manual = document.getElementById(targetId);
+        if (!manual) return;
+        const setState = () => {
+            if (cb.checked) {
+                manual.readOnly = false;
+                manual.classList.remove('text-muted');
+            } else {
+                manual.value = '';
+                manual.readOnly = true;
+                manual.classList.add('text-muted');
+            }
+        }
+        setState();
+        cb.addEventListener('change', setState);
+    });
 });
 </script>
 {% endblock %}

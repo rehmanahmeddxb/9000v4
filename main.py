@@ -6,7 +6,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from datetime import datetime, date
 from sqlalchemy import func, case
-from models import db, User, Client, Material, Entry, PendingBill, GRN, GRNItem, Booking, BookingItem, Payment, BillCounter, DirectSale, DirectSaleItem
+from types import SimpleNamespace
+from models import db, User, Client, Material, Entry, PendingBill, Booking, BookingItem, Payment, Invoice, BillCounter, DirectSale, DirectSaleItem
 
 app = Flask(__name__)
 # Increase max content length to 16MB to handle large JSON imports
@@ -80,6 +81,82 @@ db.init_app(app)
 login_manager = LoginManager()
 login_manager.login_view = 'login'
 login_manager.init_app(app)
+
+
+# Ensure DB has `password_hash` column before any queries occur
+def _ensure_user_password_column():
+    """Ensure `password_hash` column exists on `user` table and copy legacy `password` values.
+
+    Uses textual SQL via `text()` to avoid SQLAlchemy coercion errors.
+    """
+    from sqlalchemy import text
+
+    try:
+        rows = db.session.execute(text("PRAGMA table_info('user')")).fetchall()
+        cols = [r[1] for r in rows]
+        if 'password_hash' not in cols:
+            # Add the column and copy legacy values if present
+            db.session.execute(text("ALTER TABLE user ADD COLUMN password_hash VARCHAR(200);"))
+            if 'password' in cols:
+                db.session.execute(text("UPDATE user SET password_hash = password WHERE password_hash IS NULL;"))
+            db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+# Run early migration once at import-time so subsequent imports/requests are safe
+
+def _ensure_model_columns():
+    """Add any missing columns declared in models but missing in the DB.
+
+    This is a pragmatic, best-effort migration helper to bring older SQLite
+    databases in sync. It maps common SQLAlchemy types to reasonable SQLite
+    column types and runs simple ALTER TABLE ADD COLUMN commands. Uses `text()`
+    for SQL execution to avoid coercion errors.
+    """
+    from sqlalchemy import String, Integer, Float, Date, DateTime, Boolean, Text, text
+
+    try:
+        for table in db.metadata.sorted_tables:
+            rows = db.session.execute(text(f"PRAGMA table_info('{table.name}')")).fetchall()
+            existing_cols = [r[1] for r in rows]
+            for col in table.columns:
+                if col.name not in existing_cols:
+                    coltype = col.type
+                    sqltype = 'VARCHAR(200)'
+                    if isinstance(coltype, (String, Text)):
+                        sqltype = 'VARCHAR(200)'
+                    elif isinstance(coltype, (Integer, Boolean)):
+                        sqltype = 'INTEGER'
+                    elif isinstance(coltype, Float):
+                        sqltype = 'REAL'
+                    elif isinstance(coltype, Date):
+                        sqltype = 'DATE'
+                    elif isinstance(coltype, DateTime):
+                        sqltype = 'DATETIME'
+
+                    try:
+                        db.session.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {sqltype};"))
+                    except Exception:
+                        # If a single column fails to add, continue with others
+                        db.session.rollback()
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+
+with app.app_context():
+    db.create_all()
+    try:
+        _ensure_user_password_column()
+    except Exception:
+        # Best-effort at startup; don't prevent app import if migration fails
+        pass
+
+    try:
+        _ensure_model_columns()
+    except Exception:
+        # Best-effort: continue even if generic migration fails
+        pass
 
 
 # --- Helper Functions ---
@@ -212,59 +289,47 @@ def add_payment():
                       auto_bill_no=auto_bill_no,
                       photo_path=photo_path)
     db.session.add(payment)
+    db.session.flush()
+
+    # Apply payment to matching pending bills when possible
+    remaining = float(amount)
+    applied = []
+
+    # Prefer matching by bill_no when provided
+    if manual_bill_no:
+        pending_q = PendingBill.query.filter_by(bill_no=manual_bill_no).order_by(PendingBill.id.asc()).all()
+    else:
+        # Otherwise apply to oldest unpaid bills for this client
+        pending_q = PendingBill.query.filter_by(client_name=client_name, is_paid=False).order_by(PendingBill.id.asc()).all()
+
+    for pb in pending_q:
+        if remaining <= 0:
+            break
+        if pb.is_paid:
+            continue
+        if remaining >= (pb.amount or 0):
+            remaining -= (pb.amount or 0)
+            pb.amount = 0
+            pb.is_paid = True
+            applied.append((pb.bill_no, 'paid'))
+        else:
+            pb.amount = (pb.amount or 0) - remaining
+            applied.append((pb.bill_no, f'partial {remaining:.2f}'))
+            remaining = 0
+
     db.session.commit()
-    flash('Payment received successfully', 'success')
+
+    msg = 'Payment received successfully'
+    if applied:
+        details = ', '.join([f"{b}: {s}" for b, s in applied])
+        msg += f" — applied to: {details}"
+    flash(msg, 'success')
     return redirect(url_for('payments_page'))
 
 
-@app.route('/grn')
-@login_required
-def grn_page():
-    grns = GRN.query.order_by(GRN.date_posted.desc()).all()
-    materials = Material.query.all()
-    counter = BillCounter.query.first()
-    if not counter:
-        counter = BillCounter(count=1000)
-        db.session.add(counter)
-        db.session.commit()
-    next_auto = f"#{counter.count}"
-    return render_template('grn.html',
-                           grns=grns,
-                           materials=materials,
-                           next_auto=next_auto)
-
-
-@app.route('/add_grn', methods=['POST'])
-@login_required
-def add_grn():
-    supplier = request.form.get('supplier')
-    materials = request.form.getlist('mat_name[]')
-    qtys = request.form.getlist('qty[]')
-    rates = request.form.getlist('unit_rate[]')
-    manual_bill_no = request.form.get('manual_bill_no')
-    photo_path = save_photo(request.files.get('photo'))
-    auto_bill_no = get_next_bill_no()
-
-    grn = GRN(supplier=supplier,
-              manual_bill_no=manual_bill_no,
-              auto_bill_no=auto_bill_no,
-              photo_path=photo_path)
-    db.session.add(grn)
-    db.session.flush()
-
-    for mat, qty, rate in zip(materials, qtys, rates):
-        if mat:
-            db.session.add(
-                GRNItem(grn_id=grn.id,
-                        mat_name=mat,
-                        qty=float(qty),
-                        price_at_time=float(rate)))
-            # Also update material stock/total in current system if needed
-            # For now just record the GRN
-
-    db.session.commit()
-    flash('GRN added successfully', 'success')
-    return redirect(url_for('grn_page'))
+# GRN feature removed: stock-in functionality is handled via Entries with type='IN'.
+# The `/grn`, `/add_grn` and edit/delete handlers and `grn.html` template were removed
+# to simplify the system and avoid maintaining duplicated inventory flows.
 
 
 @app.route('/view_bill/<path:bill_no>')
@@ -275,16 +340,65 @@ def view_bill(bill_no):
 
     booking = Booking.query.filter_by(auto_bill_no=search_no).first()
     payment = Payment.query.filter_by(auto_bill_no=search_no).first()
-    grn = GRN.query.filter_by(auto_bill_no=search_no).first()
+    invoice = Invoice.query.filter_by(invoice_no=search_no).first()
 
     if booking:
-        return render_template('view_bill.html', bill=booking, type='Booking')
+        return render_template('view_bill.html', bill=booking, type='Booking', items=booking.items)
     if payment:
         return render_template('view_bill.html', bill=payment, type='Payment')
-    if grn: return render_template('view_bill.html', bill=grn, type='GRN')
+    if invoice:
+        # Shape invoice into expected template fields
+        # Provide `auto_bill_no`, `amount`, `paid_amount`, `date_posted`, and `items` for compatibility
+        invoice.auto_bill_no = invoice.invoice_no
+        invoice.amount = invoice.total_amount
+        invoice.paid_amount = (invoice.total_amount - invoice.balance) if invoice.total_amount is not None and invoice.balance is not None else 0
+        invoice.date_posted = datetime.combine(invoice.date, datetime.min.time()) if invoice.date else None
+
+        # Build items list from linked DirectSale items if available, otherwise from entries
+        items = []
+        if getattr(invoice, 'direct_sales', None):
+            # Use first linked direct sale's items for display
+            if invoice.direct_sales:
+                ds = invoice.direct_sales[0]
+                items = [{'name': it.product_name, 'qty': it.qty} for it in ds.items]
+        if not items and getattr(invoice, 'entries', None):
+            items = [{'name': e.material, 'qty': e.qty} for e in invoice.entries]
+        return render_template('view_bill.html', bill=invoice, type='Invoice', items=items)
+
 
     flash('Bill not found', 'danger')
     return redirect(url_for('index'))
+
+
+@app.route('/download_invoice/<path:bill_no>')
+@login_required
+def download_invoice(bill_no):
+    # For now, provide a simple HTML download of the invoice details. PDF generation could be added later.
+    search_no = bill_no if bill_no.startswith('#') else f"#{bill_no}"
+    inv = Invoice.query.filter_by(invoice_no=search_no).first()
+    if not inv:
+        flash('Invoice not found', 'danger')
+        return redirect(url_for('index'))
+
+    # Render the invoice view and send as an attachment (HTML) for convenience
+    inv.auto_bill_no = inv.invoice_no
+    inv.amount = inv.total_amount
+    inv.paid_amount = (inv.total_amount - inv.balance) if inv.total_amount is not None and inv.balance is not None else 0
+    inv.date_posted = datetime.combine(inv.date, datetime.min.time()) if inv.date else None
+
+    items = []
+    if getattr(inv, 'direct_sales', None) and inv.direct_sales:
+        ds = inv.direct_sales[0]
+        items = [{'name': it.product_name, 'qty': it.qty} for it in ds.items]
+    if not items and getattr(inv, 'entries', None):
+        items = [{'name': e.material, 'qty': e.qty} for e in inv.entries]
+
+    rendered = render_template('view_bill.html', bill=inv, type='Invoice', items=items)
+    from flask import make_response
+    response = make_response(rendered)
+    response.headers['Content-Disposition'] = f'attachment; filename=invoice-{inv.invoice_no}.html'
+    response.headers['Content-Type'] = 'text/html; charset=utf-8'
+    return response
 
 
 @app.route('/edit_bill/Booking/<int:id>', methods=['POST'])
@@ -335,21 +449,7 @@ def edit_payment(id):
     return redirect(url_for('payments_page'))
 
 
-@app.route('/edit_bill/GRN/<int:id>', methods=['POST'])
-@login_required
-def edit_grn(id):
-    grn = GRN.query.get_or_404(id)
-    grn.supplier = request.form.get('supplier')
-    grn.manual_bill_no = request.form.get('manual_bill_no')
-
-    new_photo = save_photo(request.files.get('photo'))
-    if new_photo:
-        grn.photo_path = new_photo
-
-    db.session.commit()
-    flash('GRN updated', 'success')
-    return redirect(url_for('grn_page'))
-
+# GRN edit handler removed (GRN feature deprecated).
 
 @app.route('/direct_sales')
 @login_required
@@ -357,6 +457,11 @@ def direct_sales_page():
     sales = DirectSale.query.order_by(DirectSale.date_posted.desc()).all()
     materials = Material.query.all()
     clients = Client.query.filter_by(is_active=True).all()
+    # collect categories from clients and include 'Cash'
+    categories = sorted(list({c.category for c in clients if c.category}))
+    if 'Cash' not in categories:
+        categories.insert(0, 'Cash')
+    client_name_prefill = request.args.get('client_name', '').strip()
     counter = BillCounter.query.first()
     if not counter:
         counter = BillCounter(count=1000)
@@ -367,13 +472,18 @@ def direct_sales_page():
                            sales=sales,
                            materials=materials,
                            clients=clients,
-                           next_auto=next_auto)
+                           categories=categories,
+                           next_auto=next_auto,
+                           client_name_prefill=client_name_prefill)
 
 
 @app.route('/add_direct_sale', methods=['POST'])
 @login_required
 def add_direct_sale():
-    client_name = request.form.get('client_name')
+    # Backwards-compatible alias: support legacy POST to /add_sale
+
+    # Accept either explicit client_name (from hidden input) or the visible client_code field if user typed a free-text name
+    client_name = request.form.get('client_name') or request.form.get('client_code')
     materials = request.form.getlist('product_name[]')
     qtys = request.form.getlist('qty[]')
     rates = request.form.getlist('unit_rate[]')
@@ -384,41 +494,200 @@ def add_direct_sale():
     photo_path = save_photo(request.files.get('photo'))
     auto_bill_no = get_next_bill_no()
 
-    # Auto-add to PendingBill
-    client = Client.query.filter_by(name=client_name).first()
-    if client:
-        existing_pb = PendingBill.query.filter_by(bill_no=auto_bill_no, client_code=client.code).first()
+    # Category (may be 'Cash' for non-registered customers)
+    category = request.form.get('category') or ''
+
+    # If category is 'Cash', respect manual customer name input and do not resolve a registered client
+    client = None
+    if category.lower() == 'cash':
+        manual_client_name = request.form.get('manual_client_name')
+        if manual_client_name:
+            client_name = manual_client_name
+    else:
+        # Try to resolve client by name first, then by code if the user submitted a code
+        client = Client.query.filter_by(name=client_name).first()
+        if not client and client_name:
+            client_by_code = Client.query.filter_by(code=client_name).first()
+            if client_by_code:
+                client = client_by_code
+                # Normalize client_name to actual client name for storage
+                client_name = client.name
+
+    # Check if user asked to create an Invoice for this sale
+    create_invoice = bool(request.form.get('create_invoice'))
+    # Respect explicit 'has_bill' flag on the form. If absent, default to True
+    # (backwards compatible with older forms that omit this field).
+    hv = request.form.get('has_bill')
+    if hv is None:
+        has_bill = True
+    else:
+        has_bill = hv in ['on', '1', 'true', 'True']
+
+    # If client exists, we may create a PendingBill or Invoice based on form
+    pending_amount = max(0.0, float(amount) - float(paid_amount))
+
+    # Enforce manual invoice requirement if client requires it and invoice not requested and no manual bill provided
+    if client and client.require_manual_invoice and (not create_invoice) and not manual_bill_no:
+        flash('Manual invoice required for this client. Please provide Manual Bill No or check Create Invoice.', 'danger')
+        return redirect(url_for('direct_sales_page'))
+
+    # Handle invoice creation when requested
+    inv = None
+    invoice_no = None
+    if create_invoice:
+        # Prefer manual bill no as manual invoice number
+        if manual_bill_no:
+            invoice_no = manual_bill_no
+            is_manual = True
+        else:
+            invoice_no = get_next_bill_no()
+            is_manual = False
+
+        # Ensure uniqueness
+        existing_global = Invoice.query.filter_by(invoice_no=invoice_no).first()
+        if existing_global and not is_manual:
+            # auto-generated collided; generate until unique
+            while Invoice.query.filter_by(invoice_no=invoice_no).first():
+                invoice_no = get_next_bill_no()
+        elif existing_global and is_manual:
+            if client and existing_global.client_code != client.code:
+                flash(f'Invoice number "{invoice_no}" is already used by another client. Pick a different manual invoice number.', 'danger')
+                return redirect(url_for('direct_sales_page'))
+
+        # Create or update the Invoice record
+        inv = Invoice.query.filter_by(invoice_no=invoice_no, client_code=(client.code if client else None)).first()
+        balance = max(0.0, float(amount) - float(paid_amount))
+        status = 'OPEN'
+        if balance <= 0:
+            status = 'PAID'
+        elif paid_amount > 0:
+            status = 'PARTIAL'
+
+        if inv:
+            inv.client_name = client.name if client else client_name
+            inv.total_amount = amount
+            inv.balance = balance
+            inv.is_cash = bool(request.form.get('track_as_cash'))
+            inv.status = status
+            inv.date = datetime.now().date()
+        else:
+            inv = Invoice(client_code=(client.code if client else None),
+                          client_name=client.name if client else client_name,
+                          invoice_no=invoice_no,
+                          is_manual=is_manual,
+                          date=datetime.now().date(),
+                          total_amount=amount,
+                          balance=balance,
+                          status=status,
+                          is_cash=bool(request.form.get('track_as_cash')),
+                          created_at=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                          created_by=current_user.username)
+            db.session.add(inv)
+            db.session.flush()
+
+    app.logger.info('add_direct_sale: client=%s create_invoice=%s has_bill=%s pending_amount=%s category=%s', getattr(client, 'code', None), create_invoice, has_bill, pending_amount, category)
+
+    # Auto-add to PendingBill for any billed sale with outstanding amount (including cash category)
+    if has_bill and not create_invoice and pending_amount > 0:
+        app.logger.info('Creating pending bill for direct sale: %s %s', getattr(client, 'code', None), auto_bill_no)
+        existing_pb = PendingBill.query.filter_by(bill_no=auto_bill_no, client_code=(client.code if client else None)).first()
         if not existing_pb:
             db.session.add(PendingBill(
-                client_code=client.code,
-                client_name=client.name,
+                client_code=(client.code if client else None),
+                client_name=(client.name if client else client_name),
                 bill_no=auto_bill_no,
-                amount=amount,
+                amount=pending_amount,
                 reason=f"Direct Sale: {materials[0] if materials else ''}",
                 created_at=datetime.now().strftime('%Y-%m-%d'),
                 created_by=current_user.username
             ))
+
+    # Special-case: unpaid Cash category direct sales should create a cash PendingBill so they appear
+    # in the cash pending payments section (is_cash=True). We use an empty bill_no for cash payments.
+    if (category and category.lower() == 'cash') and pending_amount > 0:
+        app.logger.info('Creating cash pending bill for direct sale (cash): %s', client_name)
+        existing_pb = PendingBill.query.filter_by(client_name=client_name, amount=pending_amount, is_cash=True).first()
+        if not existing_pb:
+            db.session.add(PendingBill(
+                client_code=None,
+                client_name=client_name,
+                bill_no='',
+                amount=pending_amount,
+                reason=f"Cash Direct Sale: {materials[0] if materials else ''}",
+                is_cash=True,
+                created_at=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                created_by=current_user.username
+            ))
+
+    # If invoice created and there's a balance, add PendingBill using invoice number so it's tracked
+    if create_invoice and inv and inv.balance > 0 and has_bill:
+        existing_pb = PendingBill.query.filter_by(bill_no=inv.invoice_no, client_code=(client.code if client else None)).first()
+        if not existing_pb:
+            db.session.add(PendingBill(
+                client_code=(client.code if client else None),
+                client_name=(client.name if client else client_name),
+                bill_no=inv.invoice_no,
+                amount=inv.balance,
+                reason=f"Direct Sale: {materials[0] if materials else ''}",
+                created_at=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                created_by=current_user.username
+            ))
+    # If client not found, leave as free-text name on the sale (cash customer)
 
     sale = DirectSale(client_name=client_name,
                       amount=amount,
                       paid_amount=paid_amount,
                       manual_bill_no=manual_bill_no,
                       auto_bill_no=auto_bill_no,
-                      photo_path=photo_path)
+                      photo_path=photo_path,
+                      category=category)
     db.session.add(sale)
     db.session.flush()
 
+    # If we created an Invoice above, link it to the sale
+    if create_invoice and inv:
+        sale.invoice_id = inv.id
+
+    items_created = []
     for mat, qty, rate in zip(materials, qtys, rates):
         if mat:
-            db.session.add(
-                DirectSaleItem(sale_id=sale.id,
+            dsi = DirectSaleItem(sale_id=sale.id,
                                product_name=mat,
                                qty=float(qty),
-                               price_at_time=float(rate)))
+                               price_at_time=float(rate))
+            db.session.add(dsi)
+            items_created.append(dsi)
+
+    # Create dispatching Entry rows for each sale item so this sale appears in material ledger
+    now = datetime.now()
+    for item in items_created:
+        entry = Entry(date=now.strftime('%Y-%m-%d'),
+                      time=now.strftime('%H:%M:%S'),
+                      type='OUT',
+                      material=item.product_name,
+                      client=client_name,
+                      client_code=(client.code if client else None),
+                      qty=item.qty,
+                      bill_no=(manual_bill_no if manual_bill_no else (auto_bill_no if has_bill else None)),
+                      auto_bill_no=auto_bill_no,
+                      nimbus_no='Direct Sale',
+                      created_by=current_user.username,
+                      client_category=category)
+        db.session.add(entry)
 
     db.session.commit()
-    flash('Direct sale added successfully', 'success')
+    msg = 'Direct sale added successfully'
+    if create_invoice and inv:
+        msg += f" — Invoice: {inv.invoice_no}"
+    flash(msg, 'success')
     return redirect(url_for('direct_sales_page'))
+
+
+# Legacy alias: maintain compatibility for `/add_sale`
+@app.route('/add_sale', methods=['POST'])
+@login_required
+def add_sale():
+    return add_direct_sale()
 
 
 @app.route('/edit_bill/DirectSale/<int:id>', methods=['POST'])
@@ -464,8 +733,6 @@ def delete_bill(type, id):
         bill = Booking.query.get(id)
     elif type == 'Payment':
         bill = Payment.query.get(id)
-    elif type == 'GRN':
-        bill = GRN.query.get(id)
     elif type == 'DirectSale':
         bill = DirectSale.query.get(id)
     else:
@@ -480,7 +747,6 @@ def delete_bill(type, id):
 
     if type == 'Booking': return redirect(url_for('bookings_page'))
     if type == 'Payment': return redirect(url_for('payments_page'))
-    if type == 'GRN': return redirect(url_for('grn_page'))
     if type == 'DirectSale': return redirect(url_for('direct_sales_page'))
     return redirect(url_for('index'))
 
@@ -587,16 +853,17 @@ def financial_ledger_details(client_id):
 @login_required
 def material_ledger_page(mat_id):
     material = Material.query.get_or_404(mat_id)
-    grns = GRNItem.query.filter_by(mat_name=material.name).all()
+    # Use stock-in entries (Entry.type == 'IN') to represent additions to stock
+    stock_ins = Entry.query.filter_by(material=material.name, type='IN').all()
     sales = DirectSaleItem.query.filter_by(product_name=material.name).all()
 
     all_transactions = []
-    for g in grns:
+    for e in stock_ins:
         all_transactions.append({
-            'date': g.grn.date_posted,
-            'item': g.mat_name,
-            'bill_no': g.grn.auto_bill_no,
-            'add': g.qty,
+            'date': e.date if not isinstance(e.date, str) else datetime.strptime(e.date, '%Y-%m-%d'),
+            'item': e.material,
+            'bill_no': e.bill_no or '',
+            'add': e.qty,
             'delivered': 0
         })
     for s in sales:
@@ -634,8 +901,6 @@ def view_bill_detail(type, id):
         bill = Booking.query.get_or_404(id)
     elif type == 'Payment':
         bill = Payment.query.get_or_404(id)
-    elif type == 'GRN':
-        bill = GRN.query.get_or_404(id)
     elif type == 'DirectSale':
         bill = DirectSale.query.get_or_404(id)
     else:
@@ -688,7 +953,7 @@ def login():
     if request.method == 'POST':
         user = User.query.filter_by(
             username=request.form.get('username')).first()
-        if user and check_password_hash(user.password,
+        if user and check_password_hash(user.password_hash,
                                         str(request.form.get('password'))):
             login_user(user)
             return redirect(url_for('index'))
@@ -1040,11 +1305,31 @@ def add_record():
     now = datetime.now()
     client_name = request.form.get('client')
     client_code = None
+    client_obj = None
     if client_name:
         client_obj = Client.query.filter_by(name=client_name).first()
         if client_obj: client_code = client_obj.code
-    db.session.add(
-        Entry(date=entry_date,
+
+    # Enforce that OUT dispatches for non-registered (cash) customers use Direct Sale
+    if request.form.get('type') == 'OUT' and not client_obj:
+        db.session.rollback()
+        flash('Unknown client: For cash customers not in your client directory, please use the Direct Sale form.', 'warning')
+        # Redirect to Direct Sales page and prefill client name if provided
+        return redirect(url_for('direct_sales_page', client_name=client_name or ''))
+
+    # For registered clients, enforce that OUT dispatches only happen when there's a booking
+    # for the same client and material (material booking). If none exists, ask to use Direct Sale.
+    if request.form.get('type') == 'OUT' and client_obj:
+        material_name = request.form.get('material')
+        has_booking = BookingItem.query.join(Booking).filter(
+            Booking.client_name == client_obj.name,
+            BookingItem.material_name == material_name).first()
+        if not has_booking:
+            db.session.rollback()
+            flash('No booking found for this client and material. Use Direct Sale for cash customers or create a booking first.', 'warning')
+            return redirect(url_for('direct_sales_page', client_name=client_name or '', client_material=material_name or ''))
+
+    entry = Entry(date=entry_date,
               time=now.strftime('%H:%M:%S'),
               type=request.form.get('type'),
               material=request.form.get('material'),
@@ -1053,7 +1338,124 @@ def add_record():
               qty=float(request.form.get('qty')),
               bill_no=request.form.get('bill_no'),
               nimbus_no=request.form.get('nimbus_no'),
-              created_by=current_user.username))
+              created_by=current_user.username)
+    db.session.add(entry)
+    db.session.flush()
+
+    # Respect explicit 'has_bill' flag on the form. If absent, default to True
+    # (backwards compatible with older forms that omit this field).
+    hv = request.form.get('has_bill')
+    if hv is None:
+        has_bill = True
+    else:
+        has_bill = hv in ['on', '1', 'true', 'True']
+
+    material_obj = Material.query.filter_by(name=entry.material).first()
+    unit_price = (material_obj.unit_price if material_obj else 0) or 0
+    amount = float(entry.qty) * float(unit_price)
+
+    # Invoice creation logic: create Invoice when requested or when manual bill_no provided
+    create_invoice = bool(request.form.get('create_invoice'))
+    client_obj = None
+    if entry.client_code:
+        client_obj = Client.query.filter_by(code=entry.client_code).first()
+
+    # Enforce manual invoice when client requires it
+    if client_obj and client_obj.require_manual_invoice and entry.type == 'OUT' and not entry.bill_no and not create_invoice:
+        db.session.rollback()
+        flash('Manual invoice required for this client. Please provide Bill/Invoice No. or check Create Invoice.', 'danger')
+        return redirect(url_for('dispatching'))
+
+        invoice_no = None
+        inv = None
+        # Only create invoice if user asked for it and the transaction is considered 'has_bill'
+        if has_bill and (create_invoice or entry.bill_no):
+            # Prefer explicit bill_no as manual invoice
+            if entry.bill_no:
+                invoice_no = entry.bill_no
+                is_manual = True
+            else:
+                # Auto-generate invoice number
+                invoice_no = get_next_bill_no()
+                entry.auto_bill_no = invoice_no
+                is_manual = False
+
+            # Ensure uniqueness of invoice_no across all invoices. If a collision happens on auto-generated
+            # number, keep generating until we find a unique value. For manual invoice numbers, report an error
+            # if the number is already used by another client.
+            existing_global = Invoice.query.filter_by(invoice_no=invoice_no).first()
+            if existing_global and not is_manual:
+                # auto-generated collided; generate next until unique
+                while Invoice.query.filter_by(invoice_no=invoice_no).first():
+                    invoice_no = get_next_bill_no()
+                entry.auto_bill_no = invoice_no
+            elif existing_global and is_manual:
+                # Manual invoice number is already in use (possibly by another client)
+                if existing_global.client_code != entry.client_code:
+                    db.session.rollback()
+                    flash(f'Invoice number "{invoice_no}" is already used by another client. Pick a different manual invoice number.', 'danger')
+                    return redirect(url_for('dispatching'))
+
+            # Now create or update invoice for this client
+            inv = Invoice.query.filter_by(invoice_no=invoice_no, client_code=entry.client_code).first()
+            if inv:
+                inv.client_name = entry.client
+                inv.total_amount = amount
+                inv.balance = amount
+                inv.is_cash = bool(request.form.get('track_as_cash'))
+                inv.date = datetime.strptime(entry.date, '%Y-%m-%d').date() if entry.date else datetime.now().date()
+            else:
+                inv = Invoice(client_code=entry.client_code,
+                              client_name=entry.client,
+                              invoice_no=invoice_no,
+                              is_manual=is_manual,
+                              date=datetime.strptime(entry.date, '%Y-%m-%d').date() if entry.date else datetime.now().date(),
+                              total_amount=amount,
+                              balance=amount,
+                              is_cash=bool(request.form.get('track_as_cash')),
+                              created_at=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                              created_by=current_user.username)
+                db.session.add(inv)
+                db.session.flush()
+            entry.invoice_id = inv.id
+
+        # Case A: Billed dispatch (has explicit manual bill_no or auto_bill_no) -> create/update PendingBill
+        if has_bill and (entry.bill_no or entry.auto_bill_no):
+            bill_no = entry.bill_no or entry.auto_bill_no
+            client_code = entry.client_code
+            client_name = entry.client
+
+            existing_pb = PendingBill.query.filter_by(bill_no=bill_no, client_code=client_code).first()
+            if existing_pb:
+                existing_pb.client_name = client_name
+                existing_pb.amount = amount
+                existing_pb.reason = f"Dispatch: {entry.material}"
+                existing_pb.created_at = datetime.now().strftime('%Y-%m-%d %H:%M')
+                existing_pb.created_by = current_user.username
+            else:
+                db.session.add(PendingBill(
+                    client_code=client_code,
+                    client_name=client_name,
+                    bill_no=bill_no,
+                    amount=amount,
+                    reason=f"Dispatch: {entry.material}",
+                    created_at=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    created_by=current_user.username
+                ))
+        else:
+            # Case B: No bill requested. If user checked 'track_as_cash', record it as a cash pending bill
+            if request.form.get('track_as_cash'):
+                db.session.add(PendingBill(
+                    client_code=entry.client_code,
+                    client_name=entry.client,
+                    bill_no='',
+                    amount=amount,
+                    reason=f"Cash Delivery: {entry.material}",
+                    is_cash=True,
+                    created_at=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    created_by=current_user.username
+                ))
+
     db.session.commit()
     flash("Record Saved", "success")
     return redirect(url_for('index'))
@@ -1092,14 +1494,62 @@ def edit_entry(id):
     e.nimbus_no = request.form.get('nimbus_no') if request.form.get(
         'nimbus_no') else None
 
-    # Propagate to PendingBill if this was a dispatch entry with a bill
-    if e.type == 'OUT' and old_bill_no:
-        bill = PendingBill.query.filter_by(
-            bill_no=old_bill_no, client_code=old_client_code).first()
-        if bill:
-            bill.bill_no = e.bill_no
-            bill.client_name = e.client
-            bill.client_code = e.client_code
+    # Synchronize PendingBill based on this entry's OUT status and bill_no
+    if e.type == 'OUT':
+        # Case: bill removed on edit -> delete associated PendingBill
+        if not e.bill_no and old_bill_no:
+            PendingBill.query.filter_by(bill_no=old_bill_no, client_code=old_client_code).delete()
+        else:
+            # Try to find by new bill_no first, then fall back to old bill_no
+            pb = None
+            if e.bill_no:
+                pb = PendingBill.query.filter_by(bill_no=e.bill_no, client_code=e.client_code).first()
+            if not pb and old_bill_no:
+                pb = PendingBill.query.filter_by(bill_no=old_bill_no, client_code=old_client_code).first()
+
+            qty = e.qty
+            material_obj = Material.query.filter_by(name=e.material).first()
+            unit_price = (material_obj.unit_price if material_obj else 0) or 0
+            amount = float(qty) * float(unit_price)
+
+            if pb:
+                pb.bill_no = e.bill_no or pb.bill_no
+                pb.client_name = e.client
+                pb.client_code = e.client_code
+                pb.amount = amount
+                pb.reason = f"Dispatch: {e.material}"
+                pb.created_at = pb.created_at or datetime.now().strftime('%Y-%m-%d %H:%M')
+                pb.created_by = pb.created_by or current_user.username
+            else:
+                if e.bill_no:
+                    db.session.add(PendingBill(
+                        client_code=e.client_code,
+                        client_name=e.client,
+                        bill_no=e.bill_no,
+                        amount=amount,
+                        reason=f"Dispatch: {e.material}",
+                        created_at=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                        created_by=current_user.username
+                    ))
+
+            # Ensure an Invoice exists for edited bill_no where applicable
+            if e.bill_no:
+                inv = Invoice.query.filter_by(invoice_no=e.bill_no, client_code=e.client_code).first()
+                if not inv:
+                    inv = Invoice(client_code=e.client_code,
+                                  client_name=e.client,
+                                  invoice_no=e.bill_no,
+                                  is_manual=True,
+                                  date=datetime.strptime(e.date, '%Y-%m-%d').date() if e.date else datetime.now().date(),
+                                  total_amount=amount,
+                                  balance=amount,
+                                  created_at=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                                  created_by=current_user.username)
+                    db.session.add(inv)
+                    db.session.flush()
+                e.invoice_id = inv.id
+            else:
+                e.invoice_id = None
 
     db.session.commit()
     flash('Entry Updated and synchronized with Pending Bills', 'success')
@@ -1182,6 +1632,15 @@ def tracking():
     page = request.args.get('page', 1, type=int)
 
     has_filter = bool(s or end or cl or m or search or bill_no or category)
+    # New filters for type and has_bill
+    type_filter = request.args.get('type', '').strip()
+    has_bill_filter = request.args.get('has_bill', '').strip()
+    
+    if type_filter:
+        # Add type to has_filter so UI shows results when only type is selected
+        has_filter = True
+    if has_bill_filter in ['0','1']:
+        has_filter = True
 
     entries = []
     pagination = None
@@ -1194,11 +1653,19 @@ def tracking():
         if end: query = query.filter(Entry.date <= end)
         if cl: query = query.filter(Entry.client == cl)
         if m: query = query.filter(Entry.material == m)
-        if bill_no: query = query.filter(Entry.bill_no.ilike(f'%{bill_no}%'))
+        if bill_no: query = query.filter(db.or_(Entry.bill_no.ilike(f'%{bill_no}%'), Entry.auto_bill_no.ilike(f'%{bill_no}%')))
         if category:
             query = query.join(Client,
                                Entry.client_code == Client.code).filter(
                                    Client.category == category)
+        # Apply type filter if provided
+        if type_filter:
+            query = query.filter(Entry.type == type_filter)
+        # Apply has_bill filter: 1 => has bill, 0 => no bill
+        if has_bill_filter == '1':
+            query = query.filter(db.or_(Entry.bill_no != None, Entry.auto_bill_no != None)).filter(db.or_(Entry.bill_no != '', Entry.auto_bill_no != ''))
+        if has_bill_filter == '0':
+            query = query.filter(db.and_(Entry.bill_no == None, Entry.auto_bill_no == None))
 
         if search:
             query = query.filter(
@@ -1214,7 +1681,46 @@ def tracking():
                                                            error_out=False)
         entries = pagination.items
 
-        # Recalculate summary with category filter if needed
+        # Include Booking items as 'BOOKING' rows when appropriate
+        booking_entries = []
+        # Only include bookings if no type filter or the type filter explicitly requests bookings
+        if not type_filter or type_filter == 'BOOKING':
+            bq = Booking.query
+            if s: bq = bq.filter(Booking.date_posted >= s)
+            if end: bq = bq.filter(Booking.date_posted <= end)
+            if cl: bq = bq.filter(Booking.client_name == cl)
+            if search:
+                bq = bq.filter(db.or_(Booking.client_name.ilike(f'%{search}%'),
+                                      Booking.manual_bill_no.ilike(f'%{search}%'),
+                                      Booking.auto_bill_no.ilike(f'%{search}%')))
+            # material and category filters are applied at item level
+            for b in bq.order_by(Booking.date_posted.desc()).all():
+                for item in b.items:
+                    if m and item.material_name != m:
+                        continue
+                    # If category filter requested, attempt to match via client lookup
+                    if category:
+                        cobj = Client.query.filter_by(name=b.client_name).first()
+                        if not cobj or cobj.category != category:
+                            continue
+                    be = SimpleNamespace()
+                    be.id = f"b-{item.id}"
+                    be.date = b.date_posted.strftime('%Y-%m-%d') if b.date_posted else ''
+                    be.time = b.date_posted.strftime('%H:%M') if b.date_posted else ''
+                    be.type = 'BOOKING'
+                    be.client = b.client_name
+                    client_obj = Client.query.filter_by(name=b.client_name).first()
+                    be.client_code = client_obj.code if client_obj else ''
+                    be.material = item.material_name
+                    be.qty = item.qty
+                    be.bill_no = b.auto_bill_no or b.manual_bill_no or ''
+                    be.nimbus_no = ''
+                    be.created_by = 'Booking'
+                    be.booking_id = b.id
+                    be.item_id = item.id
+                    booking_entries.append(be)
+
+        # Recalculate summary with category filter if needed (include bookings as negative/reserved)
         base_query = db.session.query(
             Entry.material,
             func.sum(case((Entry.type == 'IN', Entry.qty),
@@ -1241,7 +1747,43 @@ def tracking():
 
         summary_query = base_query.group_by(Entry.material).all()
         summary = {row.material: row.net for row in summary_query}
+
+        # Subtract booking quantities (bookings are reservations / outgoing) from the summary
+        if booking_entries:
+            # Aggregate booking quantities per material
+            book_map = {}
+            for be in booking_entries:
+                book_map[be.material] = book_map.get(be.material, 0) + (be.qty or 0)
+            for mat, q in book_map.items():
+                summary[mat] = summary.get(mat, 0) - q
+
         total_qty = sum(summary.values()) if summary else 0
+
+        # Merge booking entries into page results (sort by date/time desc)
+        if booking_entries:
+            # Convert pagination Entry objects to SimpleNamespace for uniformity
+            normalized = []
+            for e in entries:
+                ns = SimpleNamespace(
+                    id=e.id,
+                    date=e.date,
+                    time=e.time,
+                    type=e.type,
+                    client=e.client,
+                    client_code=e.client_code,
+                    material=e.material,
+                    qty=e.qty,
+                    bill_no=e.bill_no or '',
+                    nimbus_no=e.nimbus_no or '',
+                    created_by=e.created_by if hasattr(e, 'created_by') else None
+                )
+                normalized.append(ns)
+            normalized.extend(booking_entries)
+            # Sort by date desc then time desc
+            normalized.sort(key=lambda x: (x.date or '', x.time or ''), reverse=True)
+            entries = normalized
+            # Disable pagination when bookings are merged (simpler UX)
+            pagination = None
 
     today_str = date.today().strftime('%Y-%m-%d')
     # Get all pending bills with photos to match by bill_no
@@ -1269,7 +1811,9 @@ def tracking():
         total_qty=total_qty,
         summary=summary,
         has_filter=has_filter,
-        pending_photos=pending_photos)
+        pending_photos=pending_photos,
+        type_filter=type_filter,
+        has_bill_filter=has_bill_filter)
 
 
 @app.route('/import_jumble')
@@ -1296,7 +1840,7 @@ def add_user():
         flash('Username exists', 'danger')
     else:
         new_u = User(username=un,
-                     password=pw,
+                     password_hash=pw,
                      role=rl,
                      can_view_stock='can_view_stock' in request.form,
                      can_view_daily='can_view_daily' in request.form,
@@ -1344,7 +1888,7 @@ def delete_user(id):
 @app.route('/change_password', methods=['POST'])
 @login_required
 def change_password():
-    current_user.password = generate_password_hash(
+    current_user.password_hash = generate_password_hash(
         str(request.form.get('password')))
     db.session.commit()
     flash('Password Updated', 'success')
@@ -1382,6 +1926,19 @@ def delete_selected_data():
         if 'materials' in targets:
             Material.query.delete()
             deleted_info.append('Materials')
+        if 'direct_sales' in targets:
+            # Remove line items first to avoid FK issues, then sales
+            DirectSaleItem.query.delete()
+            DirectSale.query.delete()
+            deleted_info.append('Direct Sales')
+        if 'payments' in targets:
+            Payment.query.delete()
+            deleted_info.append('Payments')
+        if 'bookings' in targets:
+            # Remove booking items then bookings
+            BookingItem.query.delete()
+            Booking.query.delete()
+            deleted_info.append('Bookings')
 
         db.session.commit()
         flash(f'Data Wiped: {", ".join(deleted_info)}', 'danger')
@@ -1434,13 +1991,16 @@ def pending_bills():
         'bill_no': request.args.get('bill_no', '').strip(),
         'bill_from': request.args.get('bill_from', '').strip(),
         'bill_to': request.args.get('bill_to', '').strip(),
-        'category': category
+        'category': category,
+        'is_cash': request.args.get('is_cash', '').strip()
     }
     query = PendingBill.query
     if filters['client_code']:
         query = query.filter(PendingBill.client_code == filters['client_code'])
     if filters['bill_no']:
         query = query.filter(PendingBill.bill_no == filters['bill_no'])
+    if filters['is_cash'] != '':
+        query = query.filter(PendingBill.is_cash == (filters['is_cash'] == '1'))
 
     if filters['bill_from'] and filters['bill_to']:
         try:
@@ -1740,13 +2300,17 @@ def confirm_import():
     return redirect(url_for('pending_bills'))
 
 
+# `_ensure_user_password_column` moved earlier to run at module import-time to
+# ensure the `password_hash` column exists before any queries execute.
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        _ensure_user_password_column()
         if not User.query.filter_by(username='admin').first():
             db.session.add(
                 User(username='admin',
-                     password=generate_password_hash('admin123'),
+                     password_hash=generate_password_hash('admin123'),
                      role='admin'))
             db.session.commit()
     app.run(host='0.0.0.0', port=5000)

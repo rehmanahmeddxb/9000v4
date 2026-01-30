@@ -84,12 +84,39 @@
                         <div class="col-6"><div class="form-check small"><input class="form-check-input" type="checkbox" name="delete_targets" value="dispatching" id="wipeDispatch"><label class="form-check-label text-white" for="wipeDispatch">Dispatch (OUT)</label></div></div>
                         <div class="col-6"><div class="form-check small"><input class="form-check-input" type="checkbox" name="delete_targets" value="receiving" id="wipeReceive"><label class="form-check-label text-white" for="wipeReceive">Receive (IN)</label></div></div>
                         <div class="col-6"><div class="form-check small"><input class="form-check-input" type="checkbox" name="delete_targets" value="materials" id="wipeMaterials"><label class="form-check-label text-white" for="wipeMaterials">Materials</label></div></div>
+                        <div class="col-6"><div class="form-check small"><input class="form-check-input" type="checkbox" name="delete_targets" value="direct_sales" id="wipeDirectSales"><label class="form-check-label text-white" for="wipeDirectSales">Direct Sales</label></div></div>
+                        <div class="col-6"><div class="form-check small"><input class="form-check-input" type="checkbox" name="delete_targets" value="payments" id="wipePayments"><label class="form-check-label text-white" for="wipePayments">Payments</label></div></div>
+                        <div class="col-6"><div class="form-check small"><input class="form-check-input" type="checkbox" name="delete_targets" value="bookings" id="wipeBookings"><label class="form-check-label text-white" for="wipeBookings">Bookings</label></div></div>
                     </div>
-                    <div class="mb-2">
-                        <input type="text" name="confirm_text" class="form-control form-control-sm bg-dark text-white border-danger" placeholder="Type DELETE SELECTED" required>
-                    </div>
-                    <button type="submit" class="btn btn-danger btn-sm w-100 fw-bold" onclick="return confirm('Delete SELECTED datasets?')">Wipe Selected</button>
+
+                    <button type="button" id="openWipeModal" class="btn btn-danger btn-sm w-100 fw-bold" data-bs-toggle="modal" data-bs-target="#wipeConfirmModal">Wipe Selected</button>
+                
                 </form>
+
+                <!-- Wipe confirmation modal -->
+                <div class="modal fade" id="wipeConfirmModal" tabindex="-1">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <form id="wipeConfirmForm" class="modal-content border-danger bg-dark text-white" action="{{ url_for('delete_selected_data') }}" method="POST">
+                            <div class="modal-header border-danger py-2">
+                                <h6 class="fw-bold mb-0 text-danger">Confirm Data Wipe</h6>
+                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <p class="text-white-50 small">You are about to permanently delete the following datasets:</p>
+                                <ul id="selectedDatasetsList" class="text-white small mb-3"></ul>
+                                <div class="mb-2">
+                                    <input type="text" id="modal_confirm_text" name="confirm_text" class="form-control form-control-sm bg-dark text-white border-danger" placeholder="Type DELETE SELECTED to confirm" required>
+                                </div>
+                                <div class="form-check mb-2">
+                                    <input class="form-check-input" type="checkbox" id="ackCheck"><label class="form-check-label text-white-50" for="ackCheck">I understand this action is irreversible</label>
+                                </div>
+                            </div>
+                            <div class="modal-footer border-0">
+                                <button type="submit" id="modal_submit_btn" class="btn btn-danger w-100 fw-bold" disabled>Confirm Wipe</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             </div>
         </div>
         {% endif %}
@@ -99,6 +126,45 @@
 <!-- Modals -->
 {% if current_user.role == 'admin' %}
 <div class="modal fade" id="addUserModal" tabindex="-1">
+
+<!-- Wipe modal client-side script -->
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+    const openBtn = document.getElementById('openWipeModal');
+    if (openBtn) {
+        openBtn.addEventListener('click', function(e){
+            const checked = Array.from(document.querySelectorAll('input[name="delete_targets"]:checked'));
+            if (!checked.length) {
+                alert('Please select at least one dataset to wipe');
+                e.preventDefault();
+                return;
+            }
+            const list = document.getElementById('selectedDatasetsList');
+            list.innerHTML = '';
+            const form = document.getElementById('wipeConfirmForm');
+            // remove previous hidden inputs
+            form.querySelectorAll('input[name="delete_targets"]').forEach(n => n.remove());
+            checked.forEach(c => {
+                const lbl = document.querySelector('label[for="' + c.id + '"]');
+                const labelText = lbl ? lbl.innerText.trim() : c.value;
+                const li = document.createElement('li'); li.innerText = labelText; list.appendChild(li);
+                const hidden = document.createElement('input'); hidden.type='hidden'; hidden.name='delete_targets'; hidden.value=c.value; form.appendChild(hidden);
+            });
+            document.getElementById('modal_confirm_text').value='';
+            document.getElementById('ackCheck').checked=false;
+            document.getElementById('modal_submit_btn').disabled=true;
+        });
+
+        function checkModalEnable(){
+            const confirmed = document.getElementById('modal_confirm_text').value === 'DELETE SELECTED';
+            const acked = document.getElementById('ackCheck').checked;
+            document.getElementById('modal_submit_btn').disabled = !(confirmed && acked);
+        }
+        document.getElementById('modal_confirm_text').addEventListener('input', checkModalEnable);
+        document.getElementById('ackCheck').addEventListener('change', checkModalEnable);
+    }
+});
+</script>
     <div class="modal-dialog modal-dialog-centered">
         <form action="/add_user" method="POST" class="modal-content border-secondary bg-dark text-white">
             <div class="modal-header border-secondary py-2">

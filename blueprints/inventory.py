@@ -55,23 +55,39 @@ def stock_summary():
 @inventory_bp.route('/daily_transactions')
 @login_required
 def daily_transactions():
-    sel_date = request.args.get('date', date.today().strftime('%Y-%m-%d'))
+    # Support date range and category filtering
+    date_from = request.args.get('date_from') or request.args.get('date') or date.today().strftime('%Y-%m-%d')
+    date_to = request.args.get('date_to') or date_from
+    category = request.args.get('category', '').strip()
+
     page = request.args.get('page', 1, type=int)
     per_page = 50  # Increased for better visibility
-    
-    entries_pagination = Entry.query.filter_by(date=sel_date).order_by(Entry.time.desc()).paginate(page=page, per_page=per_page)
+
+    q = Entry.query.filter(Entry.date >= date_from, Entry.date <= date_to)
+    if category:
+        q = q.filter(Entry.client_category == category)
+    entries_pagination = q.order_by(Entry.date.desc(), Entry.time.desc()).paginate(page=page, per_page=per_page)
+
     materials = Material.query.all()
-    
-    # Get pending bills with photos for this date's entries
+    from models import Client, PendingBill
+    # Build categories list for filter
+    categories = sorted(list({c.category for c in Client.query.all() if c.category}))
+    if 'Cash' not in categories:
+        categories.insert(0, 'Cash')
+
+    # Get pending bills with photos for this date range's entries
     bill_numbers = [e.bill_no for e in entries_pagination.items if e.bill_no]
-    from models import PendingBill
     pending_photos = {b.bill_no: b.photo_url for b in PendingBill.query.filter(PendingBill.bill_no.in_(bill_numbers), PendingBill.photo_url != '').all()}
-    
+
     return render_template('daily_transactions.html', 
                            entries=entries_pagination.items, 
                            pagination=entries_pagination, 
-                           sel_date=sel_date,
+                           sel_date=date_from,
+                           date_from=date_from,
+                           date_to=date_to,
+                           category_filter=category,
                            materials=materials,
+                           categories=categories,
                            pending_photos=pending_photos)
 
 @inventory_bp.route('/inventory_log')
